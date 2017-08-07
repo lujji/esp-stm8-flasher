@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no">
+		<link rel="stylesheet" type="text/css" href="css/siimple.min.css">
+		<link rel="stylesheet" type="text/css" href="css/style.css">
+		<link rel="shortcut icon" href="img/favicon.png">
+		<title>HTTP Server</title>
+	</head>
+	<body>
+		<ul class="navbar">
+			<li><a class="active" href="websockets">Home</a></li>
+			<li><a href="about">About</a></li>
+		</ul>
+
+		<div class="grid main">
+			<h1>Firmware Updater</h1>
+			<div id="status_box" class="alert alert-info">Ready</div>
+			<h5>Select file:</h5>
+			<ul class="fs" id="fs"></ul>
+			<div class="cover" align="center">
+				<div class="radio-group">
+					<input type="radio" id="modesel-write" name="selector" checked="checked">
+					<label class="modesel" for="modesel-write">Write</label>
+                    <input type="radio" id="modesel-read" name="selector">
+                    <label class="modesel" for="modesel-read">Read</label>
+					<input type="radio" id="modesel-delete" name="selector">
+					<label class="modesel" for="modesel-delete">Delete</label>
+				</div>
+            </div>
+            <h5>Upload firmware:</h5>
+			<div id="drop_area">Drop firmware here</div>
+		</div>
+
+		<script>
+			var ws, file, total, n;
+
+			const BLOCK_SIZE = 512;
+			const NACK = 0xDEAD;
+			const ACK = 0xAABB;
+
+			window.onload = function() {
+				var drop_area = document.getElementById("drop_area");
+				drop_area.addEventListener("drop", dropCallback);
+				drop_area.addEventListener("dragover", dragCallback);
+				fileListRequest();
+			}
+
+			function fsClick(entry) {
+				var wrt = document.getElementById("modesel-write");
+                var del = document.getElementById("modesel-delete");
+                if (wrt.checked || del.checked) {
+    				mode = (wrt.checked) ? "F" : "D";
+    				var fname = entry.innerHTML.split(':')[0]
+    				print(fname);
+    				wsOpen(function() {wsWrite(mode + fname)}, function(evt) {
+    					var dv = new DataView(evt.data);
+    					var val = dv.getUint16(0);
+    					if (val == ACK) setMsg("done", "Done!");
+    					else setMsg("error", "Error deleting file.");
+    					fileListRequest();
+    				});
+                    entry.innerHTML = "<progress value='" + 10 + "' max='100'/>"
+                } else {
+                    print("Read not supported");
+                }
+			}
+
+			function sleep(ms) {
+				return new Promise(resolve => setTimeout(resolve, ms));
+			}
+
+			function dragCallback(event) {
+				event.stopPropagation();
+				event.preventDefault();
+				var drop_area = document.getElementById("drop_area");
+				drop_area.innerHTML = "Feed me!"
+			}
+
+			function print(str) { console.log(str); }
+
+			function sendFile(n) {
+				var reader = new FileReader();
+				reader.onload = function(e) {
+					var buf = reader.result;
+					total += buf.byteLength;
+
+					var tmp = new Uint8Array(buf.byteLength + 1);
+					tmp.set(new Uint8Array(buf), 1);
+
+					console.log("sending..");
+					tmp[0] = 0x0B; // continuation frame
+					wsWrite(tmp);
+
+					if (total >= file.size) {
+						total = -1;
+						console.log("done..");
+						setMsg("done", "Done!");
+						fileListRequest();
+						// close socket here?
+					}
+				}
+				var blob = file.slice(BLOCK_SIZE * n, BLOCK_SIZE * (n + 1));
+				reader.readAsArrayBuffer(blob);
+			}
+
+			function dropCallback(event) {
+				event.stopPropagation();
+				event.preventDefault();
+				file = event.dataTransfer.files[0];
+				str = '\n' + file.name + ";" + file.size + ";";
+				setMsg("info", "Sending..");
+				wsOpen(function() { wsWrite(str); sendFile(0); } );
+			}
+
+			function setMsg(cls, text) {
+				sbox = document.getElementById('status_box');
+				sbox.className = "alert alert-" + cls;
+				sbox.innerHTML = text;
+				console.log(text);
+			}
+
+			function populateFileList(str) {
+				var list = document.getElementById("fs");
+				var res = str.split(',');
+				for (var i = 0; i < res.length; i++) {
+					var token = res[i].split(':');
+					if (token.length > 1)
+						list.innerHTML += '<li onclick="fsClick(this)">' + token[0] + ': ' + token[1] + ' bytes</li>';
+				}
+			}
+
+			function onMessage(evt) {
+				var dv = new DataView(evt.data);
+				var val = dv.getUint16(0);
+
+				if (val == 0xAABB) {
+					console.log("ACK");
+					if (total != -1) {
+						n++;
+						sendFile(n);
+					}
+				} else if (val == 0xDEAD) {
+					console.log("NACK");
+				}
+			}
+
+			function fileListRequest() {
+				console.log("Requesting file list");
+				//wss = new WebSocket("ws://" + location.host);
+				var wss = new WebSocket("ws://192.168.100.4");
+				document.getElementById("fs").innerHTML = "";
+				wss.onopen = function(evt) { wss.send('I'); };
+				//wss.onclose = function(evt) { setMsg("info", "Connection closed"); };
+				wss.onerror = function(evt) { setMsg("error", "WebSocket error!"); };
+				wss.onmessage = function(evt) { populateFileList(evt.data); };
+			}
+
+			function wsOpen(action, onmsg=null) {
+				setMsg("info", "Opening WebSocket..");
+				//ws = new WebSocket("ws://" + location.host);
+				ws = new WebSocket("ws://192.168.100.4");
+				ws.binaryType = 'arraybuffer';
+				ws.onopen = function(evt) {
+					console.log("Socket is open");
+					setMsg("info", "Sending..");
+					n = 0;
+					total = 0;
+					action();
+				};
+				ws.onclose = function(evt) { setMsg("info", "Connection closed"); };
+				ws.onerror = function(evt) { setMsg("error", "WebSocket error!"); };
+				if (onmsg == null) ws.onmessage = function(evt) { onMessage(evt); };
+				else ws.onmessage = function(evt) { onmsg(evt) };
+			}
+
+			function wsWrite(data) {
+				ws.send(data);
+				// if (ws == undefined || ws.readyState == 3) {
+				// 	wsOpen(data);
+				// 	console.log("opening..");
+				// } else if (ws.readyState == 1) {
+				// 	ws.send(data);
+				// 	return;
+				// }
+				//await sleep(500);
+			}
+		</script>
+	</body>
+</html>
