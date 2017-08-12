@@ -20,7 +20,7 @@
 #include "telnet_printf.h"
 #include "bootloader.h"
 
-QueueHandle_t qHandle;
+QueueHandle_t qFlashWriter, qBootTask;
 
 struct RxPacket {
     char *fname;
@@ -29,13 +29,15 @@ struct RxPacket {
     uint8_t type;
 };
 
+long schlong(struct _reent *r, int fd, const char *ptr, int len);
+
 void flash_writer_task(void *pvParameter) {
     int res;
     struct RxPacket rx;
     static spiffs_file fd = -1;
 
     for (;;) {
-        if (xQueueReceive(qHandle, &rx, 0)) {
+        if (xQueueReceive(qFlashWriter, &rx, 0)) {
             if (rx.type == 0) {
                 SPIFFS_clearerr(&fs);
                 if (fd != -1) {
@@ -72,9 +74,39 @@ void flash_writer_task(void *pvParameter) {
     vTaskDelete(NULL);
 }
 
-void file_reader_task(void *pvParameter) {
-    char *fname = (char *) pvParameter;
-    read_file(fname);
+void bootloader_task(void *pvParameter) {
+    char fname[32];
+
+    for (;;) {
+        if (xQueueReceive(qBootTask, fname, 0)) {
+            fname[sizeof (fname) - 1] = 0;
+            printf("here\n");
+            set_write_stdout(schlong);
+
+            /* enter bootloader */
+            //telnet_printf("resetting MCU..\n");            
+            gpio_enable(RST_PIN, GPIO_OUTPUT);
+            gpio_enable(1, GPIO_OUTPUT);
+            gpio_write(1, false);
+            gpio_write(RST_PIN, false);
+            vTaskDelay(1);
+            gpio_write(RST_PIN, true);
+
+            /* write fw */
+            //telnet_printf("writing fw..\n");
+            int ok = bootloader_upload(fname);
+
+            set_write_stdout(NULL);
+            if (!ok)
+                printf("Update failed!\n");
+            else
+                printf("Update successful\n");
+
+            gpio_write(RST_PIN, false);
+            vTaskDelay(1);
+            gpio_write(RST_PIN, true);
+        }
+    }
 
     vTaskDelete(NULL);
 }
@@ -90,7 +122,7 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
     const uint16_t NACK = 0xDEAD;
 
     static uint16_t file_size, rx_size;
-    static char fname[16];
+    static char fname[32];
     char fsize[16];
 
     uint8_t response[2];
@@ -118,7 +150,7 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
 
             packet.fname = fname;
             packet.type = 0;
-            xQueueSend(qHandle, &packet, (TickType_t) 1000);
+            xQueueSend(qFlashWriter, &packet, (TickType_t) 1000);
 
             val = ACK;
             break;
@@ -139,7 +171,7 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
                 packet.type = 2;
             }
 
-            if (xQueueSend(qHandle, &packet, (TickType_t) 1000) != pdPASS) {
+            if (xQueueSend(qFlashWriter, &packet, (TickType_t) 1000) != pdPASS) {
                 free(packet.buf);
                 val = NACK;
             }
@@ -169,11 +201,11 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
             return;
             break;
         case 'F':
-            telnet_printf("[flash]\n");
-            strlcpy(fname, (char *) &data[1], data_len);
-            telnet_printf("file: %s\n", fname);
-            xTaskCreate(&file_reader_task, "HTTP Daemon", 256, fname, 2, NULL);
-            //read_file(fname);
+            //telnet_printf("[flash]\n");
+            strlcpy(fname, (char *) &data[1], sizeof (fname));
+            telnet_printf("[flash] file: %s\n", fname);
+            xQueueSend(qBootTask, fname, (TickType_t) 100);
+            printf("Free heap: %d\n", (int) xPortGetFreeHeapSize());
             val = ACK;
             break;
         case 'D':
@@ -250,7 +282,7 @@ void heartbeat_task(void *pvParameters) {
     int ctr = 0;
     for (;;) {
         telnet_printf("Test %d\n", ctr++);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
 
     vTaskDelete(NULL);
@@ -277,7 +309,7 @@ void user_init(void) {
     //set_write_stdout(schlong);
 
     uart_set_baud(0, 115200);
-    telnet_printf("SDK version:%s\n", sdk_system_get_sdk_version());
+    //telnet_printf("SDK version:%s\n", sdk_system_get_sdk_version());
 
     struct sdk_station_config config = {
         .ssid = WIFI_SSID,
@@ -296,16 +328,18 @@ void user_init(void) {
     esp_spiffs_init();
     if (esp_spiffs_mount() != SPIFFS_OK) {
         SPIFFS_format(&fs);
-        if (esp_spiffs_mount() != SPIFFS_OK)
-            telnet_printf("Error mount SPIFFS\n");
+        //        if (esp_spiffs_mount() != SPIFFS_OK)
+        //            telnet_printf("Error mount SPIFFS\n");
     }
 
-    qHandle = xQueueCreate(8, sizeof (struct RxPacket));
+    qFlashWriter = xQueueCreate(8, sizeof (struct RxPacket));
+    qBootTask = xQueueCreate(1, 32);
 
     /* initialize tasks */
-    xTaskCreate(&heartbeat_task, "Heartbeat", 512, NULL, 2, NULL);
+    //xTaskCreate(&heartbeat_task, "Heartbeat", 1024, NULL, 2, NULL);
     xTaskCreate(&flash_writer_task, "Flash Writer", 512, NULL, 2, NULL);
-    xTaskCreate(&telnet_printf_task, "Telnet Info Task", 1024, NULL, 2, NULL);
+    xTaskCreate(&bootloader_task, "fw_writer", 1024, NULL, 2, NULL);
+    //xTaskCreate(&telnet_printf_task, "Telnet Print Task", 2048, NULL, 2, NULL);
     xTaskCreate(&telnet_task, "Telnet Task", 512, NULL, 2, NULL);
     xTaskCreate(&httpd_task, "HTTP Daemon", 128, NULL, 2, NULL);
 }

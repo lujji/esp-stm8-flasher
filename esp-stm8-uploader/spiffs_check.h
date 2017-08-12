@@ -10,12 +10,12 @@
 
 /* check result and return on error */
 #define SPIFFS_CHECK(x) \
-    if ((x) < 0) { telnet_printf("errno:%i\n", SPIFFS_errno(&fs)); return -1; }
+    if ((x) < 0) { telnet_printf("errno:%i\n", SPIFFS_errno(&fs)); return 0; }
 
 /* check result and close file handle on error */
 #define SPIFFS_CHECK_SAFE(x, fd) \
     if ((x) < 0) { telnet_printf("errno:%i\n", SPIFFS_errno(&fs)); \
-                   SPIFFS_close(&fs, fd); return -1; }
+                   SPIFFS_close(&fs, fd); return 0; }
 
 #endif /* SPIFFS_CHECK_H */
 

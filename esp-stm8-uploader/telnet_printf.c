@@ -1,40 +1,57 @@
 #include "telnet_printf.h"
 #include <string.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <lwip/sys.h>
 #include <lwip/api.h>
 
-static struct netconn *printf_client = NULL;
+static volatile bool write_pending = false;
+static SemaphoreHandle_t xSemaphore = NULL;
+static char buf[256];
+static int len;
 
 void telnet_printf_task(void *arg) {
     LWIP_UNUSED_ARG(arg);
     struct netconn *nc = NULL;
+    struct netconn *printf_client = NULL;
 
     while (1) {
         if (!nc) {
             nc = netconn_new(NETCONN_TCP);
             if (!nc) {
-                telnet_printf("Failed to allocate socket.\n");
+                /* failed to allocate socket */
                 break;
             }
             netconn_bind(nc, IP_ADDR_ANY, TELNET_PRINTF_PORT);
-            netconn_listen_with_backlog(nc, 1);
-            continue;
+            netconn_listen(nc);
         }
 
         err_t err = netconn_accept(nc, &printf_client);
 
         if (err == ERR_OK) {
-            telnet_printf("Connected\n");
             netconn_close(nc);
             netconn_delete(nc);
             nc = NULL;
 
-            struct netbuf *nb;
-            while (netconn_recv(printf_client, &nb) == ERR_OK);
+            write_pending = false;
+            xSemaphore = xSemaphoreCreateMutex();
+            telnet_printf("Welcome!\n");
 
-            //telnet_printf("Closing connection\n");
+            for (;;) {
+                if (write_pending) {
+                    write_pending = false;
+                    err = netconn_write(printf_client, buf, len, NETCONN_COPY);
+                    xSemaphoreGive(xSemaphore);
+                    if (err != ERR_OK) break;
+                }
+                vTaskDelay((TickType_t) 100);
+            }
+
+            vSemaphoreDelete(xSemaphore);
+            xSemaphore = NULL;
+
+            /* close connection */
             netconn_close(printf_client);
             netconn_delete(printf_client);
             printf_client = NULL;
@@ -48,14 +65,10 @@ void telnet_printf_task(void *arg) {
 
 int telnet_printf(const char *fmt, ...) {
     va_list ap;
-    int len = 0;
-    if (printf_client) {
+    if (xSemaphore != NULL && xSemaphoreTake(xSemaphore, (TickType_t) 10) == pdTRUE) {
+        write_pending = true;
         va_start(ap, fmt);
-
-        char buf[512];
         len = vsnprintf(buf, sizeof (buf), fmt, ap);
-        netconn_write(printf_client, buf, len, NETCONN_COPY);
-
         va_end(ap);
     }
     return len;

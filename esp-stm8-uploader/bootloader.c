@@ -2,8 +2,16 @@
 #include "spiffs_check.h"
 #include "config.h"
 #include "misc.h"
+#include "esp/uart.h"
+#include "FreeRTOSConfig.h"
 #include <spiffs.h>
 #include <esp_spiffs.h>
+#include <esp8266.h>
+
+#define POLL(__x) \
+        do { timeout = configCPU_CLOCK_HZ / 1000; while (__x) if (timeout-- == 0) return 0; } while (0)
+
+#define WAIT_FOR_ACK() if (!uart_wait_ack()) { SPIFFS_close(&fs, fd); return 0; }
 
 /**
  * Calculate CRC-8-CCIT.
@@ -26,7 +34,26 @@ static uint8_t crc8(uint8_t *data, uint8_t crc, uint16_t len) {
     return crc;
 }
 
-int read_file(const char *filename) {
+static void uart_write_block(uint8_t *buf, uint16_t len) {
+    for (uint16_t i = 0; i < len; i++)
+        uart_putc(0, buf[i]);
+}
+
+static int uart_wait_ack() {
+    uint32_t timeout;
+    int rx;
+    POLL((rx = uart_getc_nowait(0)) < 0);
+    if (rx != 0xAA) return 0;
+    POLL((rx = uart_getc_nowait(0)) < 0);
+    if (rx != 0xBB) return 0;
+    return 1;
+}
+
+static inline void uart_enable() {
+    gpio_set_iomux_function(1, IOMUX_GPIO1_FUNC_UART0_TXD);
+}
+
+int bootloader_upload(const char *filename) {
     spiffs_file fd = SPIFFS_open(&fs, filename, SPIFFS_RDONLY, 0);
     SPIFFS_CHECK(fd);
 
@@ -35,7 +62,6 @@ int read_file(const char *filename) {
     int res = SPIFFS_fstat(&fs, fd, &s);
     SPIFFS_CHECK_SAFE(res, fd);
     uint16_t size = s.size;
-    telnet_printf("Size = %d\n", size);
 
     /* read file in chunks */
     uint8_t buf[BLOCK_SIZE];
@@ -43,7 +69,7 @@ int read_file(const char *filename) {
     uint8_t crc = 0;
     uint8_t chunks = 0;
 
-    /* first pass -calculate CRC */
+    /* first pass - calculate CRC */
     for (total = size; total >= BLOCK_SIZE; total -= BLOCK_SIZE) {
         res = SPIFFS_read(&fs, fd, buf, BLOCK_SIZE);
         SPIFFS_CHECK_SAFE(res, fd);
@@ -59,34 +85,39 @@ int read_file(const char *filename) {
         crc = crc8(buf, crc, BLOCK_SIZE);
         chunks++;
     }
-    telnet_printf("CRC = %02X\n", crc);
+    //telnet_printf("Size = %d\nCRC = %02X\n", size, crc);
 
-    /* generate payload */
-    uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF, chunks, crc, crc};
+    uart_enable();
 
     /* second pass - write firmware */
     SPIFFS_lseek(&fs, fd, 0, SPIFFS_SEEK_SET); // rewind
+    uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF, chunks, crc, crc};
+    uart_write_block(payload, sizeof (payload));
     for (total = size; total >= BLOCK_SIZE; total -= BLOCK_SIZE) {
+        WAIT_FOR_ACK();
         res = SPIFFS_read(&fs, fd, buf, BLOCK_SIZE);
         SPIFFS_CHECK_SAFE(res, fd);
-        hexdump16(buf, BLOCK_SIZE);
+        //hexdump16(buf, BLOCK_SIZE);
+        uart_write_block(buf, BLOCK_SIZE);
     }
     if (total) {
         /* last chunk */
-        telnet_printf("..%d bytes remaining\n", total);
+        WAIT_FOR_ACK();
         res = SPIFFS_read(&fs, fd, buf, total);
         SPIFFS_CHECK_SAFE(res, fd);
         /* pad with 0xFF */
         memset(&buf[total], 0xFF, BLOCK_SIZE - total);
-        hexdump16(buf, BLOCK_SIZE);
+        //hexdump16(buf, BLOCK_SIZE);
+        uart_write_block(buf, BLOCK_SIZE);
     }
 
+    WAIT_FOR_ACK();
+
     if (fd >= 0) {
-        telnet_printf("Closing..\n");
+        //telnet_printf("Closing..\n");
         res = SPIFFS_close(&fs, fd);
         SPIFFS_CHECK(res);
     }
-    telnet_printf("done\n");
 
     return 1;
 }

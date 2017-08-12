@@ -54,7 +54,7 @@
     				mode = (wrt.checked) ? "F" : "D";
     				var fname = entry.innerHTML.split(':')[0]
     				print(fname);
-    				wsOpen(function() {wsWrite(mode + fname)}, function(evt) {
+    				wsOpen(function() {wsWrite(mode + fname + '\0')}, function(evt) {
     					var dv = new DataView(evt.data);
     					var val = dv.getUint16(0);
     					if (val == ACK) setMsg("done", "Done!");
