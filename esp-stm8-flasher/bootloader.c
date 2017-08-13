@@ -9,7 +9,7 @@
 #include <esp8266.h>
 
 #define POLL(__x) \
-        do { timeout = configCPU_CLOCK_HZ / 1000; while (__x) if (timeout-- == 0) return 0; } while (0)
+        do { timeout = configCPU_CLOCK_HZ / 100; while (__x) if (timeout-- == 0) return 0; } while (0)
 
 #define WAIT_FOR_ACK() if (!uart_wait_ack()) { SPIFFS_close(&fs, fd); return 0; }
 
@@ -49,10 +49,6 @@ static int uart_wait_ack() {
     return 1;
 }
 
-static inline void uart_enable() {
-    gpio_set_iomux_function(1, IOMUX_GPIO1_FUNC_UART0_TXD);
-}
-
 int bootloader_upload(const char *filename) {
     spiffs_file fd = SPIFFS_open(&fs, filename, SPIFFS_RDONLY, 0);
     SPIFFS_CHECK(fd);
@@ -86,8 +82,6 @@ int bootloader_upload(const char *filename) {
         chunks++;
     }
     //telnet_printf("Size = %d\nCRC = %02X\n", size, crc);
-
-    uart_enable();
 
     /* second pass - write firmware */
     SPIFFS_lseek(&fs, fd, 0, SPIFFS_SEEK_SET); // rewind

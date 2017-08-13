@@ -1,8 +1,9 @@
 #include "telnet_printf.h"
-#include <string.h>
+#include <stdout_redirect.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include <lwip/sys.h>
 #include <lwip/api.h>
 
@@ -72,4 +73,12 @@ int telnet_printf(const char *fmt, ...) {
         va_end(ap);
     }
     return len;
+}
+
+long schlong(struct _reent *r, int fd, const char *ptr, int len) {
+    return 0;
+}
+
+void disable_stdout() {
+    set_write_stdout(schlong);
 }

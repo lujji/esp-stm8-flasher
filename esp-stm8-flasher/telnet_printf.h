@@ -3,6 +3,8 @@
 
 #include "config.h"
 
+void disable_stdout();
+
 void telnet_printf_task(void *arg);
 
 #if TELNET_PRINTF

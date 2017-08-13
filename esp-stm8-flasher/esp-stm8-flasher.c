@@ -1,6 +1,5 @@
 #include <string.h>
 #include <stdio.h>
-#include <stdout_redirect.h>
 #include <ssid_config.h>
 #include <espressif/esp_common.h>
 #include <esp8266.h>
@@ -20,16 +19,20 @@
 #include "telnet_printf.h"
 #include "bootloader.h"
 
-QueueHandle_t qFlashWriter, qBootTask;
+static QueueHandle_t qFlashWriter, qBootTask;
+
+enum {
+    ACK = 0xAABB,
+    NACK = 0xDEAD,
+};
 
 struct RxPacket {
     char *fname;
     uint8_t *buf;
     uint16_t len;
     uint8_t type;
+    struct tcp_pcb *pcb;
 };
-
-long schlong(struct _reent *r, int fd, const char *ptr, int len);
 
 void flash_writer_task(void *pvParameter) {
     int res;
@@ -75,14 +78,10 @@ void flash_writer_task(void *pvParameter) {
 }
 
 void bootloader_task(void *pvParameter) {
-    char fname[32];
+    struct RxPacket rx;
 
     for (;;) {
-        if (xQueueReceive(qBootTask, fname, 0)) {
-            fname[sizeof (fname) - 1] = 0;
-            printf("here\n");
-            set_write_stdout(schlong);
-
+        if (xQueueReceive(qBootTask, &rx, 0)) {
             /* enter bootloader */
             //telnet_printf("resetting MCU..\n");            
             gpio_enable(RST_PIN, GPIO_OUTPUT);
@@ -91,20 +90,22 @@ void bootloader_task(void *pvParameter) {
             gpio_write(RST_PIN, false);
             vTaskDelay(1);
             gpio_write(RST_PIN, true);
+            vTaskDelay(1);
+            gpio_set_iomux_function(1, IOMUX_GPIO1_FUNC_UART0_TXD);
+            uart_clear_rxfifo(0);
+            uart_clear_txfifo(0);
 
             /* write fw */
             //telnet_printf("writing fw..\n");
-            int ok = bootloader_upload(fname);
-
-            set_write_stdout(NULL);
-            if (!ok)
-                printf("Update failed!\n");
-            else
-                printf("Update successful\n");
+            int ok = bootloader_upload(rx.fname);
 
             gpio_write(RST_PIN, false);
             vTaskDelay(1);
             gpio_write(RST_PIN, true);
+
+            uint16_t rsp = (ok) ? ACK : NACK;
+            if (rx.pcb)
+                websocket_write(rx.pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
         }
     }
 
@@ -113,24 +114,17 @@ void bootloader_task(void *pvParameter) {
 
 /**
  * This function is called when websocket frame is received.
- *
- * Note: this function is executed on TCP thread and should return as soon
- * as possible.
  */
 void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t mode) {
-    const uint16_t ACK = 0xAABB;
-    const uint16_t NACK = 0xDEAD;
-
     static uint16_t file_size, rx_size;
     static char fname[32];
     char fsize[16];
-
-    uint8_t response[2];
-    uint16_t val = NACK;
-
-    char *ptr, *sptr = (char *) data + 1;
+    
+    char *sptr = (char *) data + 1;
+    char *ptr;
     int res, len;
-
+    
+    uint16_t rsp = NACK;
     struct RxPacket packet;
 
     switch (data[0]) {
@@ -145,14 +139,11 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
             if (ptr) strlcpy(fsize, ptr, sizeof (fsize));
             file_size = atoi(fsize);
             rx_size = 0;
-
             telnet_printf("filename: %s\nfilesize: %s\n", fname, fsize);
-
             packet.fname = fname;
             packet.type = 0;
             xQueueSend(qFlashWriter, &packet, (TickType_t) 1000);
-
-            val = ACK;
+            rsp = ACK;
             break;
         case 0x0B: // data frame
             telnet_printf("[data]\n");
@@ -171,42 +162,40 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
                 packet.type = 2;
             }
 
+            rsp = ACK;
             if (xQueueSend(qFlashWriter, &packet, (TickType_t) 1000) != pdPASS) {
                 free(packet.buf);
-                val = NACK;
+                rsp = NACK;
             }
-
-            val = ACK;
             break;
         case 'I':
             telnet_printf("[info]\n");
-            gpio_write(LED_PIN, true);
-            //uart_putc(0, 0xBB);
-
             spiffs_DIR d;
             struct spiffs_dirent e;
             struct spiffs_dirent *pe = &e;
 
             SPIFFS_opendir(&fs, "/", &d);
-            char rsp[64];
+            char buf[64];
             while ((pe = SPIFFS_readdir(&d, pe))) {
                 telnet_printf("%s [%04x] size:%i\n", pe->name, pe->obj_id, pe->size);
-                int len = snprintf(rsp, sizeof (rsp),
+                int len = snprintf(buf, sizeof (buf),
                         "%s:%d,", (char *) pe->name, pe->size);
-                if (len < sizeof (rsp))
-                    websocket_write(pcb, (uint8_t *) rsp, len, WS_TEXT_MODE);
+                if (len < sizeof (buf))
+                    websocket_write(pcb, (uint8_t *) buf, len, WS_TEXT_MODE);
             }
+            rsp = ACK;
+            websocket_write(pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
             res = SPIFFS_closedir(&d);
             SPIFFS_CHECK_INF(res);
             return;
             break;
         case 'F':
-            //telnet_printf("[flash]\n");
+            telnet_printf("[flash]\n");
             strlcpy(fname, (char *) &data[1], sizeof (fname));
-            telnet_printf("[flash] file: %s\n", fname);
-            xQueueSend(qBootTask, fname, (TickType_t) 100);
-            printf("Free heap: %d\n", (int) xPortGetFreeHeapSize());
-            val = ACK;
+            packet.fname = fname;
+            packet.pcb = pcb;
+            xQueueSend(qBootTask, &packet, (TickType_t) 100);
+            return;
             break;
         case 'D':
             telnet_printf("[delete]\n");
@@ -214,22 +203,15 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
             telnet_printf("deleting file: %s\n", fname);
             res = SPIFFS_remove(&fs, fname);
             SPIFFS_CHECK_INF(res);
-            val = (res >= 0) ? ACK : NACK;
+            rsp = (res >= 0) ? ACK : NACK;
             break;
         default:
             telnet_printf("Unknown command\n");
-            val = NACK;
+            rsp = NACK;
             break;
     }
 
-    response[1] = (uint8_t) val;
-    response[0] = val >> 8;
-
-    websocket_write(pcb, response, 2, WS_BIN_MODE);
-}
-
-long schlong(struct _reent *r, int fd, const char *ptr, int len) {
-    return 0;
+    websocket_write(pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
 }
 
 void telnet_task(void *arg) {
@@ -249,6 +231,7 @@ void telnet_task(void *arg) {
         }
 
         err_t err = netconn_accept(nc, &client);
+        netconn_set_recvtimeout(client, 1);
 
         if (err == ERR_OK) {
             telnet_printf("Connected\n");
@@ -257,15 +240,26 @@ void telnet_task(void *arg) {
             nc = NULL;
 
             struct netbuf *nb;
-            while (netconn_recv(client, &nb) == ERR_OK) {
-                void *data;
-                uint16_t len;
-                netbuf_data(nb, &data, &len);
-                telnet_printf("RX\n");
-                //telnet_printf("RX: %.*s\n", len, (char *) data);
-                err = netconn_write(client, data, len, NETCONN_COPY);
-                netbuf_delete(nb);
+            for (;;) {
+                int rx;
+                if ((rx = uart_getc_nowait(0)) != -1) {
+                    err = netconn_write(client, (uint8_t *) & rx, 1, NETCONN_COPY);
+                    if (err != ERR_OK) break;
+                }
+
+                err = netconn_recv(client, &nb);
+                if (err == ERR_OK) {
+                    void *data;
+                    uint16_t len;
+                    netbuf_data(nb, &data, &len);
+                    for (uint16_t i = 0; i < len; i++)
+                        uart_putc(0, ((char *) data)[i]);
+                    netbuf_delete(nb);
+                } else if (err != ERR_TIMEOUT) {
+                    break;
+                }
             }
+
             telnet_printf("Closing connection\n");
             netconn_close(client);
             netconn_delete(client);
@@ -273,16 +267,6 @@ void telnet_task(void *arg) {
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
-
-    vTaskDelete(NULL);
-}
-
-void heartbeat_task(void *pvParameters) {
-    int ctr = 0;
-    for (;;) {
-        telnet_printf("Test %d\n", ctr++);
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
 
     vTaskDelete(NULL);
@@ -306,7 +290,7 @@ void httpd_task(void *pvParameters) {
 }
 
 void user_init(void) {
-    //set_write_stdout(schlong);
+    disable_stdout();
 
     uart_set_baud(0, 115200);
     //telnet_printf("SDK version:%s\n", sdk_system_get_sdk_version());
@@ -328,17 +312,15 @@ void user_init(void) {
     esp_spiffs_init();
     if (esp_spiffs_mount() != SPIFFS_OK) {
         SPIFFS_format(&fs);
-        //        if (esp_spiffs_mount() != SPIFFS_OK)
-        //            telnet_printf("Error mount SPIFFS\n");
+        esp_spiffs_mount();
     }
 
     qFlashWriter = xQueueCreate(8, sizeof (struct RxPacket));
-    qBootTask = xQueueCreate(1, 32);
+    qBootTask = xQueueCreate(1, sizeof (struct RxPacket));
 
     /* initialize tasks */
-    //xTaskCreate(&heartbeat_task, "Heartbeat", 1024, NULL, 2, NULL);
-    xTaskCreate(&flash_writer_task, "Flash Writer", 512, NULL, 2, NULL);
-    xTaskCreate(&bootloader_task, "fw_writer", 1024, NULL, 2, NULL);
+    xTaskCreate(&flash_writer_task, "Flash Writer Task", 512, NULL, 2, NULL);
+    xTaskCreate(&bootloader_task, "Bootloader Task", 1024, NULL, 2, NULL);
     //xTaskCreate(&telnet_printf_task, "Telnet Print Task", 2048, NULL, 2, NULL);
     xTaskCreate(&telnet_task, "Telnet Task", 512, NULL, 2, NULL);
     xTaskCreate(&httpd_task, "HTTP Daemon", 128, NULL, 2, NULL);

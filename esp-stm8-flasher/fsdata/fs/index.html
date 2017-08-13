@@ -32,11 +32,10 @@
             <h5>Upload firmware:</h5>
 			<div id="drop_area">Drop firmware here</div>
 		</div>
-
 		<script>
 			var ws, file, total, n;
 
-			const BLOCK_SIZE = 512;
+			const CHUNK_SIZE = 512;
 			const NACK = 0xDEAD;
 			const ACK = 0xAABB;
 
@@ -47,42 +46,35 @@
 				fileListRequest();
 			}
 
-			function fsClick(entry) {
+			function onClick(entry) {
 				var wrt = document.getElementById("modesel-write");
                 var del = document.getElementById("modesel-delete");
                 if (wrt.checked || del.checked) {
     				mode = (wrt.checked) ? "F" : "D";
     				var fname = entry.innerHTML.split(':')[0]
-    				print(fname);
-    				wsOpen(function() {wsWrite(mode + fname + '\0')}, function(evt) {
+                    var fsize = parseInt(entry.innerHTML.split(':')[1])
+    				console.log(fname);
+    				wsOpen(function() {wsWrite(mode + fname + '\0')}, async function(evt) {
     					var dv = new DataView(evt.data);
-    					var val = dv.getUint16(0);
-    					if (val == ACK) setMsg("done", "Done!");
-    					else setMsg("error", "Error deleting file.");
+    					var val = dv.getUint16(0, true);
+    					if (val == ACK) {
+                            setMsg("done", "Done!");
+    					} else {
+                            if (wrt.checked) setMsg("error", "Firmware upload failed!");
+                            else setMsg("error", "Could not delete file!");
+                        }
+                        await sleep(250);
     					fileListRequest();
     				});
-                    entry.innerHTML = "<progress value='" + 10 + "' max='100'/>"
+                    entry.innerHTML = "<div class='loader'/>"
                 } else {
-                    print("Read not supported");
+                    console.log("Read not implemented");
                 }
 			}
 
-			function sleep(ms) {
-				return new Promise(resolve => setTimeout(resolve, ms));
-			}
-
-			function dragCallback(event) {
-				event.stopPropagation();
-				event.preventDefault();
-				var drop_area = document.getElementById("drop_area");
-				drop_area.innerHTML = "Feed me!"
-			}
-
-			function print(str) { console.log(str); }
-
 			function sendFile(n) {
 				var reader = new FileReader();
-				reader.onload = function(e) {
+				reader.onload = async function(e) {
 					var buf = reader.result;
 					total += buf.byteLength;
 
@@ -97,13 +89,21 @@
 						total = -1;
 						console.log("done..");
 						setMsg("done", "Done!");
+                        await sleep(1000);
+                        // close socket here?
 						fileListRequest();
-						// close socket here?
 					}
 				}
-				var blob = file.slice(BLOCK_SIZE * n, BLOCK_SIZE * (n + 1));
+				var blob = file.slice(CHUNK_SIZE * n, CHUNK_SIZE * (n + 1));
 				reader.readAsArrayBuffer(blob);
 			}
+
+            function dragCallback(event) {
+                event.stopPropagation();
+                event.preventDefault();
+                var drop_area = document.getElementById("drop_area");
+                drop_area.innerHTML = "Feed me!"
+            }
 
 			function dropCallback(event) {
 				event.stopPropagation();
@@ -122,19 +122,19 @@
 			}
 
 			function populateFileList(str) {
+                if (typeof(str) != typeof('')) return;
 				var list = document.getElementById("fs");
 				var res = str.split(',');
 				for (var i = 0; i < res.length; i++) {
 					var token = res[i].split(':');
 					if (token.length > 1)
-						list.innerHTML += '<li onclick="fsClick(this)">' + token[0] + ': ' + token[1] + ' bytes</li>';
+						list.innerHTML += '<li onclick="onClick(this)">' + token[0] + ': ' + token[1] + ' bytes</li>';
 				}
 			}
 
 			function onMessage(evt) {
 				var dv = new DataView(evt.data);
-				var val = dv.getUint16(0);
-
+				var val = dv.getUint16(0, true);
 				if (val == 0xAABB) {
 					console.log("ACK");
 					if (total != -1) {
@@ -175,17 +175,9 @@
 				else ws.onmessage = function(evt) { onmsg(evt) };
 			}
 
-			function wsWrite(data) {
-				ws.send(data);
-				// if (ws == undefined || ws.readyState == 3) {
-				// 	wsOpen(data);
-				// 	console.log("opening..");
-				// } else if (ws.readyState == 1) {
-				// 	ws.send(data);
-				// 	return;
-				// }
-				//await sleep(500);
-			}
+			function wsWrite(data) { ws.send(data); }
+
+            function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 		</script>
 	</body>
 </html>
