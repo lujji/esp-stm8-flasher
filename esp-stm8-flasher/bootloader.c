@@ -1,17 +1,23 @@
 #include "bootloader.h"
 #include "spiffs_check.h"
 #include "config.h"
-#include "misc.h"
-#include "esp/uart.h"
-#include "FreeRTOSConfig.h"
-#include <spiffs.h>
-#include <esp_spiffs.h>
+#include <FreeRTOSConfig.h>
 #include <esp8266.h>
+#include <esp/uart.h>
+#include <esp_spiffs.h>
+#include <spiffs.h>
 
 #define POLL(__x) \
-        do { timeout = configCPU_CLOCK_HZ / 100; while (__x) if (timeout-- == 0) return 0; } while (0)
+        do { \
+            timeout = configCPU_CLOCK_HZ / 100; \
+            while (__x) if (!timeout--) return 0; \
+        } while (0)
 
-#define WAIT_FOR_ACK() if (!uart_wait_ack()) { SPIFFS_close(&fs, fd); return 0; }
+#define WAIT_FOR_ACK() \
+        if (!wait_for_ack()) { \
+            SPIFFS_close(&fs, fd); \
+            return 0; \
+        }
 
 /**
  * Calculate CRC-8-CCIT.
@@ -39,7 +45,7 @@ static void uart_write_block(uint8_t *buf, uint16_t len) {
         uart_putc(0, buf[i]);
 }
 
-static int uart_wait_ack() {
+static int wait_for_ack() {
     uint32_t timeout;
     int rx;
     POLL((rx = uart_getc_nowait(0)) < 0);
@@ -81,7 +87,6 @@ int bootloader_upload(const char *filename) {
         crc = crc8(buf, crc, BLOCK_SIZE);
         chunks++;
     }
-    //telnet_printf("Size = %d\nCRC = %02X\n", size, crc);
 
     /* second pass - write firmware */
     SPIFFS_lseek(&fs, fd, 0, SPIFFS_SEEK_SET); // rewind
@@ -91,7 +96,6 @@ int bootloader_upload(const char *filename) {
         WAIT_FOR_ACK();
         res = SPIFFS_read(&fs, fd, buf, BLOCK_SIZE);
         SPIFFS_CHECK_SAFE(res, fd);
-        //hexdump16(buf, BLOCK_SIZE);
         uart_write_block(buf, BLOCK_SIZE);
     }
     if (total) {
@@ -101,14 +105,12 @@ int bootloader_upload(const char *filename) {
         SPIFFS_CHECK_SAFE(res, fd);
         /* pad with 0xFF */
         memset(&buf[total], 0xFF, BLOCK_SIZE - total);
-        //hexdump16(buf, BLOCK_SIZE);
         uart_write_block(buf, BLOCK_SIZE);
     }
 
     WAIT_FOR_ACK();
 
     if (fd >= 0) {
-        //telnet_printf("Closing..\n");
         res = SPIFFS_close(&fs, fd);
         SPIFFS_CHECK(res);
     }

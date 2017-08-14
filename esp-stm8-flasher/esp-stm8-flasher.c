@@ -12,10 +12,10 @@
 #include <httpd/httpd.h>
 #include <lwip/sys.h>
 #include <lwip/api.h>
-
 #include "config.h"
 #include "misc.h"
 #include "spiffs_check.h"
+#include "telnet.h"
 #include "telnet_printf.h"
 #include "bootloader.h"
 
@@ -77,32 +77,33 @@ void flash_writer_task(void *pvParameter) {
     vTaskDelete(NULL);
 }
 
+static void stm8_reset() {
+    gpio_enable(RST_PIN, GPIO_OUTPUT);
+    gpio_write(RST_PIN, false);
+    vTaskDelay(1);
+    gpio_write(RST_PIN, true);    
+    gpio_disable(RST_PIN);
+}
+
 void bootloader_task(void *pvParameter) {
     struct RxPacket rx;
 
     for (;;) {
         if (xQueueReceive(qBootTask, &rx, 0)) {
             /* enter bootloader */
-            //telnet_printf("resetting MCU..\n");            
-            gpio_enable(RST_PIN, GPIO_OUTPUT);
             gpio_enable(1, GPIO_OUTPUT);
             gpio_write(1, false);
-            gpio_write(RST_PIN, false);
+            stm8_reset();
             vTaskDelay(1);
-            gpio_write(RST_PIN, true);
-            vTaskDelay(1);
+            gpio_disable(1);
             gpio_set_iomux_function(1, IOMUX_GPIO1_FUNC_UART0_TXD);
             uart_clear_rxfifo(0);
             uart_clear_txfifo(0);
 
             /* write fw */
-            //telnet_printf("writing fw..\n");
+            telnet_printf("writing fw..\n");
             int ok = bootloader_upload(rx.fname);
-
-            gpio_write(RST_PIN, false);
-            vTaskDelay(1);
-            gpio_write(RST_PIN, true);
-
+            
             uint16_t rsp = (ok) ? ACK : NACK;
             if (rx.pcb)
                 websocket_write(rx.pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
@@ -214,64 +215,6 @@ void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t
     websocket_write(pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
 }
 
-void telnet_task(void *arg) {
-    LWIP_UNUSED_ARG(arg);
-    struct netconn *nc = NULL, *client = NULL;
-
-    while (1) {
-        if (!nc) {
-            nc = netconn_new(NETCONN_TCP);
-            if (!nc) {
-                telnet_printf("Failed to allocate socket.\n");
-                break;
-            }
-            netconn_bind(nc, IP_ADDR_ANY, TELNET_PORT);
-            netconn_listen(nc);
-            continue;
-        }
-
-        err_t err = netconn_accept(nc, &client);
-        netconn_set_recvtimeout(client, 1);
-
-        if (err == ERR_OK) {
-            telnet_printf("Connected\n");
-            netconn_close(nc);
-            netconn_delete(nc);
-            nc = NULL;
-
-            struct netbuf *nb;
-            for (;;) {
-                int rx;
-                if ((rx = uart_getc_nowait(0)) != -1) {
-                    err = netconn_write(client, (uint8_t *) & rx, 1, NETCONN_COPY);
-                    if (err != ERR_OK) break;
-                }
-
-                err = netconn_recv(client, &nb);
-                if (err == ERR_OK) {
-                    void *data;
-                    uint16_t len;
-                    netbuf_data(nb, &data, &len);
-                    for (uint16_t i = 0; i < len; i++)
-                        uart_putc(0, ((char *) data)[i]);
-                    netbuf_delete(nb);
-                } else if (err != ERR_TIMEOUT) {
-                    break;
-                }
-            }
-
-            telnet_printf("Closing connection\n");
-            netconn_close(client);
-            netconn_delete(client);
-            client = NULL;
-        }
-
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
-
-    vTaskDelete(NULL);
-}
-
 char *about_cgi_handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[]) {
     return "/about.html";
 }
@@ -291,9 +234,7 @@ void httpd_task(void *pvParameters) {
 
 void user_init(void) {
     disable_stdout();
-
     uart_set_baud(0, 115200);
-    //telnet_printf("SDK version:%s\n", sdk_system_get_sdk_version());
 
     struct sdk_station_config config = {
         .ssid = WIFI_SSID,
@@ -309,12 +250,14 @@ void user_init(void) {
     gpio_enable(LED_PIN, GPIO_OUTPUT);
     gpio_write(LED_PIN, true);
 
+    /* initialize SPIFFS */
     esp_spiffs_init();
     if (esp_spiffs_mount() != SPIFFS_OK) {
         SPIFFS_format(&fs);
         esp_spiffs_mount();
     }
 
+    /* initialize queues */
     qFlashWriter = xQueueCreate(8, sizeof (struct RxPacket));
     qBootTask = xQueueCreate(1, sizeof (struct RxPacket));
 

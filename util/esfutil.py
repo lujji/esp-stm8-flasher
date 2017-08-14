@@ -75,15 +75,16 @@ def fw_list():
     while True:
         f = ws.recv()
         if not f or f == ACK: break
-        print(f)
+        f = f[:-1].split(':')
+        print('* %s: %s bytes' % (f[0], f[1]))
 
 if __name__ == "__main__":
     #websocket.enableTrace(True)
-    parser = argparse.ArgumentParser(description='esp-stm8-flasher upload utility',
-        epilog='example:\n  python upload.py -p firmware.bin 192.168.100.4\n\r',
+    parser = argparse.ArgumentParser(description='esp-stm8-flasher utility',
+        epilog='example:\n  python esfutil.py -p firmware.bin 192.168.100.4\n\r',
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('-p', '--program', metavar='', help='program firmware (equal to upload, flash and delete)')
-    parser.add_argument('-u', '--upload-only', metavar='', help='upload a file (without programming)')
+    parser.add_argument('-p', '--program', metavar='', help='program firmware (upload, flash and delete)')
+    parser.add_argument('-u', '--upload-only', metavar='', help='upload a file (without flashing)')
     parser.add_argument('-f', '--flash-only', metavar='', help='flash remote file')
     parser.add_argument('-d', '--delete', metavar='', help='delete remote file')
     parser.add_argument('-l ', '--list', action='store_true', help='get file list')

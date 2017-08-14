@@ -89,7 +89,7 @@
 						total = -1;
 						console.log("done..");
 						setMsg("done", "Done!");
-                        await sleep(1000);
+                        await sleep(250);
                         // close socket here?
 						fileListRequest();
 					}
@@ -148,8 +148,8 @@
 
 			function fileListRequest() {
 				console.log("Requesting file list");
-				//wss = new WebSocket("ws://" + location.host);
-				var wss = new WebSocket("ws://192.168.100.4");
+				var wss = new WebSocket("ws://" + location.host);
+				//var wss = new WebSocket("ws://192.168.100.4");
 				document.getElementById("fs").innerHTML = "";
 				wss.onopen = function(evt) { wss.send('I'); };
 				//wss.onclose = function(evt) { setMsg("info", "Connection closed"); };
@@ -159,8 +159,8 @@
 
 			function wsOpen(action, onmsg=null) {
 				setMsg("info", "Opening WebSocket..");
-				//ws = new WebSocket("ws://" + location.host);
-				ws = new WebSocket("ws://192.168.100.4");
+				ws = new WebSocket("ws://" + location.host);
+				//ws = new WebSocket("ws://192.168.100.4");
 				ws.binaryType = 'arraybuffer';
 				ws.onopen = function(evt) {
 					console.log("Socket is open");
