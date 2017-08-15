@@ -45,6 +45,10 @@ static void uart_write_block(uint8_t *buf, uint16_t len) {
         uart_putc(0, buf[i]);
 }
 
+/**
+ * Wait until ACK bytes are received
+ * @return 1 = success, 0 = NACK or timeout
+ */
 static int wait_for_ack() {
     uint32_t timeout;
     int rx;

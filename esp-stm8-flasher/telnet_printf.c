@@ -64,7 +64,7 @@ void telnet_printf_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-int telnet_printf(const char *fmt, ...) {
+int _telnet_printf(const char *fmt, ...) {
     va_list ap;
     if (xSemaphore != NULL && xSemaphoreTake(xSemaphore, (TickType_t) 10) == pdTRUE) {
         write_pending = true;
@@ -75,10 +75,10 @@ int telnet_printf(const char *fmt, ...) {
     return len;
 }
 
-long schlong(struct _reent *r, int fd, const char *ptr, int len) {
+long dummy(struct _reent *r, int fd, const char *ptr, int len) {
     return 0;
 }
 
 void disable_stdout() {
-    set_write_stdout(schlong);
+    set_write_stdout(dummy);
 }

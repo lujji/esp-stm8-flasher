@@ -1,6 +1,6 @@
 import websocket, thread, time, argparse, os
 
-BLOCK_SIZE = 512
+CHUNK_SIZE = 512
 ACK = '\xBB\xAA'
 FILE = ''
 ADDR = ''
@@ -26,7 +26,7 @@ def fw_upload(file):
     data = open(file, 'rb')
     total = 0
     with data as f:
-        chunk = bytearray(f.read(BLOCK_SIZE))
+        chunk = bytearray(f.read(CHUNK_SIZE))
         while chunk:
             ws.send(chr(CMD_UPLOAD_DATA) + chunk)
             #print ' '.join(hex(i) for i in chunk)
@@ -35,7 +35,7 @@ def fw_upload(file):
                 print('Server failed to ACK')
                 exit()
             total += len(chunk)
-            chunk = bytearray(f.read(BLOCK_SIZE))
+            chunk = bytearray(f.read(CHUNK_SIZE))
     print('Sent %d bytes' % total)
     ws.close()
     print('Done')
@@ -79,7 +79,6 @@ def fw_list():
         print('* %s: %s bytes' % (f[0], f[1]))
 
 if __name__ == "__main__":
-    #websocket.enableTrace(True)
     parser = argparse.ArgumentParser(description='esp-stm8-flasher utility',
         epilog='example:\n  python esfutil.py -p firmware.bin 192.168.100.4\n\r',
         formatter_class=argparse.RawDescriptionHelpFormatter)

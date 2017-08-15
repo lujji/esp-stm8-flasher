@@ -13,7 +13,6 @@
 #include <lwip/sys.h>
 #include <lwip/api.h>
 #include "config.h"
-#include "misc.h"
 #include "spiffs_check.h"
 #include "telnet.h"
 #include "telnet_printf.h"
@@ -34,6 +33,48 @@ struct RxPacket {
     struct tcp_pcb *pcb;
 };
 
+static void stm8_reset() {
+    gpio_enable(RST_PIN, GPIO_OUTPUT);
+    gpio_write(RST_PIN, false);
+    vTaskDelay(1);
+    gpio_write(RST_PIN, true);
+    gpio_disable(RST_PIN);
+}
+
+/**
+ * Waits until file name is received from a queue and performs firmware update
+ */
+void bootloader_task(void *pvParameter) {
+    struct RxPacket rx;
+
+    for (;;) {
+        if (xQueueReceive(qBootTask, &rx, 0)) {
+            /* enter bootloader */
+            gpio_enable(1, GPIO_OUTPUT);
+            gpio_write(1, false);
+            stm8_reset();
+            vTaskDelay(1);
+            gpio_disable(1);
+            gpio_set_iomux_function(1, IOMUX_GPIO1_FUNC_UART0_TXD);
+            uart_clear_rxfifo(0);
+            uart_clear_txfifo(0);
+
+            /* write fw */
+            telnet_printf("writing fw..\n");
+            int ok = bootloader_upload(rx.fname);
+
+            uint16_t rsp = (ok) ? ACK : NACK;
+            if (rx.pcb)
+                websocket_write(rx.pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
+        }
+    }
+
+    vTaskDelete(NULL);
+}
+
+/**
+ * Writes files into flash
+ */
 void flash_writer_task(void *pvParameter) {
     int res;
     struct RxPacket rx;
@@ -77,54 +118,18 @@ void flash_writer_task(void *pvParameter) {
     vTaskDelete(NULL);
 }
 
-static void stm8_reset() {
-    gpio_enable(RST_PIN, GPIO_OUTPUT);
-    gpio_write(RST_PIN, false);
-    vTaskDelay(1);
-    gpio_write(RST_PIN, true);    
-    gpio_disable(RST_PIN);
-}
-
-void bootloader_task(void *pvParameter) {
-    struct RxPacket rx;
-
-    for (;;) {
-        if (xQueueReceive(qBootTask, &rx, 0)) {
-            /* enter bootloader */
-            gpio_enable(1, GPIO_OUTPUT);
-            gpio_write(1, false);
-            stm8_reset();
-            vTaskDelay(1);
-            gpio_disable(1);
-            gpio_set_iomux_function(1, IOMUX_GPIO1_FUNC_UART0_TXD);
-            uart_clear_rxfifo(0);
-            uart_clear_txfifo(0);
-
-            /* write fw */
-            telnet_printf("writing fw..\n");
-            int ok = bootloader_upload(rx.fname);
-            
-            uint16_t rsp = (ok) ? ACK : NACK;
-            if (rx.pcb)
-                websocket_write(rx.pcb, (uint8_t *) (&rsp), 2, WS_BIN_MODE);
-        }
-    }
-
-    vTaskDelete(NULL);
-}
-
 /**
- * This function is called when websocket frame is received.
+ * Handle incoming WebSocket packets
  */
 void websocket_cb(struct tcp_pcb *pcb, uint8_t *data, uint16_t data_len, uint8_t mode) {
     static uint16_t file_size, rx_size;
     static char fname[32];
     char fsize[16];
-    
+
     char *sptr = (char *) data + 1;
     char *ptr;
     int res, len;
-    
+
     uint16_t rsp = NACK;
     struct RxPacket packet;
 
@@ -262,9 +267,9 @@ void user_init(void) {
     qBootTask = xQueueCreate(1, sizeof (struct RxPacket));
 
     /* initialize tasks */
+    //xTaskCreate(&telnet_printf_task, "Telnet Print Task", 2048, NULL, 2, NULL);
     xTaskCreate(&flash_writer_task, "Flash Writer Task", 512, NULL, 2, NULL);
     xTaskCreate(&bootloader_task, "Bootloader Task", 1024, NULL, 2, NULL);
-    //xTaskCreate(&telnet_printf_task, "Telnet Print Task", 2048, NULL, 2, NULL);
     xTaskCreate(&telnet_task, "Telnet Task", 512, NULL, 2, NULL);
     xTaskCreate(&httpd_task, "HTTP Daemon", 128, NULL, 2, NULL);
 }
